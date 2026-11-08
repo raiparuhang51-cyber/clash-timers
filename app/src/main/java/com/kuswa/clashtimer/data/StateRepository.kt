@@ -70,7 +70,7 @@ class StateRepository(context: Context) {
 
     suspend fun widgetAccounts(ids: IntArray): Map<Int, String> {
         val prefs = store.data.first()
-        return ids.mapNotNull { id -> prefs[widgetKey(id)]?.let { id to it } }.toMap()
+        return ids.toList().mapNotNull { id -> prefs[widgetKey(id)]?.let { id to it } }.toMap()
     }
 
     suspend fun setWidgetAccount(widgetId: Int, accountId: String) {
