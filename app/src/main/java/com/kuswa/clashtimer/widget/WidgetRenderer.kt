@@ -30,6 +30,7 @@ import com.kuswa.clashtimer.core.WidgetModel
 import com.kuswa.clashtimer.core.WidgetModelBuilder
 import com.kuswa.clashtimer.core.WidgetRow
 import com.kuswa.clashtimer.sync.SyncActivity
+import com.kuswa.clashtimer.data.StateRepository
 import kotlin.math.roundToInt
 
 /** Maps a [WidgetModel] onto `widget_root.xml` + one `widget_row*.xml` per row. */
@@ -38,8 +39,10 @@ class WidgetRenderer(private val context: Context) {
     private val pkg = context.packageName
     private val icons = WidgetIcons.get(context)
     private val density = context.resources.displayMetrics.density
+    private var accountId: String = StateRepository.DEFAULT_ID
 
-    fun render(model: WidgetModel, liveCountdown: Boolean, options: Bundle?): RemoteViews {
+    fun render(model: WidgetModel, liveCountdown: Boolean, options: Bundle?, accountId: String = StateRepository.DEFAULT_ID): RemoteViews {
+        this.accountId = accountId
         val rv = RemoteViews(pkg, R.layout.widget_root)
         val sync = syncIntent()
         rv.setOnClickPendingIntent(R.id.header, sync)
@@ -186,7 +189,7 @@ class WidgetRenderer(private val context: Context) {
      * The URI makes every action + argument a distinct PendingIntent.
      */
     private fun tapIntent(action: String, arg: String): PendingIntent {
-        val uri = Uri.Builder().scheme("clashtimer").authority("tap").appendPath(action).appendPath(arg).build()
+        val uri = Uri.Builder().scheme("clashtimer").authority("tap").appendPath(action).appendPath(arg).appendPath(accountId).build()
         val intent = Intent(context, ClashWidgetReceiver::class.java)
             .setAction(ClashWidgetReceiver.ACTION_TAP)
             .setData(uri)
@@ -232,7 +235,10 @@ class WidgetRenderer(private val context: Context) {
     }
 
     private fun syncIntent(): PendingIntent {
-        val intent = Intent(context, SyncActivity::class.java).addFlags(
+        val intent = Intent(context, SyncActivity::class.java)
+            .putExtra(SyncActivity.EXTRA_ACCOUNT, accountId)
+            .setData(Uri.parse("clashtimer://sync/$accountId"))
+            .addFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_CLEAR_TASK,
         )
         return PendingIntent.getActivity(

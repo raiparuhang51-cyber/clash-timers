@@ -14,4 +14,6 @@
     android:targetCellHeight="5"
     android:resizeMode="horizontal|vertical"
     android:updatePeriodMillis="1800000"
-    android:widgetCategory="home_screen" />
+    android:widgetCategory="home_screen"
+    android:configure="com.kuswa.clashtimer.widget.AccountPickerActivity"
+    android:widgetFeatures="reconfigurable" />

@@ -15,10 +15,6 @@ object SyncRunner {
 
     data class Result(val ok: Boolean, val message: String)
 
-    /**
-     * Reads the primary clip as text. Must be called while the calling activity has window focus
-     * (Android 10+ only lets the focused app read the clipboard). Returns null if empty or blocked.
-     */
     fun readClipboard(context: Context): String? = try {
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
@@ -26,20 +22,23 @@ object SyncRunner {
         null
     }
 
-    /**
-     * Parses [clipboard], saves the new state, logs the result and refreshes the widget.
-     * Runs to completion even if the caller's scope is cancelled (the activity may finish).
-     * Never throws: errors are logged and returned as a failed [Result].
-     */
-    suspend fun sync(context: Context, clipboard: String?, source: String): Result = withContext(NonCancellable) {
+    /** Parses [clipboard] into [accountId]'s state, logs the result and refreshes the widgets. Never throws. */
+    suspend fun sync(
+        context: Context,
+        clipboard: String?,
+        source: String,
+        accountId: String = StateRepository.DEFAULT_ID,
+    ): Result = withContext(NonCancellable) {
         val app = context.applicationContext
         val repo = StateRepository(app)
+        val label = if (accountId == StateRepository.DEFAULT_ID) "" else
+            runCatching { repo.accounts().firstOrNull { it.id == accountId }?.name?.let { "$it: " } }.getOrNull() ?: ""
         val result = try {
-            val outcome = repo.updateState { old ->
+            val outcome = repo.updateState(accountId) { old ->
                 val o = SyncLogic.apply(old, clipboard)
                 o.state to o
             }
-            Result(outcome is SyncLogic.Outcome.Synced, plainText(outcome.describe(Names.get(app))))
+            Result(outcome is SyncLogic.Outcome.Synced, label + plainText(outcome.describe(Names.get(app))))
         } catch (t: Throwable) {
             Result(false, "Error: ${t.javaClass.simpleName}: ${t.message}")
         }
@@ -48,16 +47,11 @@ object SyncRunner {
         result
     }
 
-    /** Re-renders every placed widget; logs failures and how many widgets are placed. */
     suspend fun refreshWidgets(context: Context, source: String): Int {
         val count = WidgetUpdater.updateAll(context, source)
         if (count == 0) StateRepository(context).log(source, null, "No Clash Timers widget is placed on the home screen")
         return count
     }
 
-    /**
-     * Text shown by system UI (toasts, the launcher screen) uses the phone's font, which draws "→"
-     * as "ʼn" on a HiOS (Tecno) phone (the APK's strings are correct UTF-8). Use ASCII there.
-     */
     fun plainText(s: String): String = s.replace(" → ", " -> ").replace("→", "->")
 }

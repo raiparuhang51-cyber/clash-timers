@@ -23,6 +23,7 @@ class SyncActivity : ComponentActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var started = false
+    private val accountId: String get() = intent?.getStringExtra(EXTRA_ACCOUNT) ?: StateRepository.DEFAULT_ID
 
     private val focusFallback = Runnable { startSync(viaFallback = true) }
     private val hardTimeout = Runnable {
@@ -58,7 +59,7 @@ class SyncActivity : ComponentActivity() {
         if (viaFallback) log(null, "No window focus after ${FOCUS_FALLBACK_MS} ms; read clipboard anyway")
 
         lifecycleScope.launch {
-            val result = SyncRunner.sync(this@SyncActivity, text, SOURCE)
+            val result = SyncRunner.sync(this@SyncActivity, text, SOURCE, accountId)
             // Shown while this activity is still in front, so ROMs that block background toasts allow it.
             Toast.makeText(this@SyncActivity, result.message, Toast.LENGTH_LONG).show()
             finishQuietly()
@@ -85,7 +86,8 @@ class SyncActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private companion object {
+    companion object {
+        const val EXTRA_ACCOUNT = "account_id"
         const val SOURCE = "widget"
         const val FOCUS_FALLBACK_MS = 1500L
         const val HARD_TIMEOUT_MS = 8000L

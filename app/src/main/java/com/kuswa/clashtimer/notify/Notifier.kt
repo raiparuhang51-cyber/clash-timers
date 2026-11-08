@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import com.kuswa.clashtimer.MainActivity
 import com.kuswa.clashtimer.R
 import com.kuswa.clashtimer.core.FinishNotice
+import com.kuswa.clashtimer.data.StateRepository
 
 /** "Builder free: Inferno Tower" / "Lab free" / "Pet house free". */
 object Notifier {
@@ -39,14 +40,14 @@ object Notifier {
     }
 
     /** Posts one notification per finished job; returns false if notifications are blocked. */
-    fun post(context: Context, notices: List<FinishNotice>): Boolean {
+    fun post(context: Context, notices: List<FinishNotice>, accountId: String = StateRepository.DEFAULT_ID, prefix: String? = null): Boolean {
         if (!allowed(context)) return false
         ensureChannel(context)
         val nm = NotificationManagerCompat.from(context)
         for (n in notices) {
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_timer)
-                .setContentTitle(n.title)
+                .setContentTitle(if (prefix != null) "$prefix: ${n.title}" else n.title)
                 .setContentText(n.text)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -54,7 +55,7 @@ object Notifier {
                 .setContentIntent(openIntent(context))
                 .build()
             try {
-                nm.notify(n.jobKey.hashCode(), notification)
+                nm.notify("$accountId/${n.jobKey}".hashCode(), notification)
             } catch (e: SecurityException) {
                 return false
             }

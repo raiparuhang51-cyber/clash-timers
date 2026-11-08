@@ -9,8 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import com.kuswa.clashtimer.core.AppState
 import com.kuswa.clashtimer.core.FinishNotices
 import com.kuswa.clashtimer.core.WidgetActions
+import com.kuswa.clashtimer.core.WidgetModel
 import com.kuswa.clashtimer.core.WidgetModelBuilder
 import com.kuswa.clashtimer.core.WidgetSchedule
 import com.kuswa.clashtimer.data.Names
@@ -23,12 +25,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * The home-screen widget, drawn with plain RemoteViews (not Glance) so it can use the Lilita One
- * font, Chronometer countdowns, progress bars and the design's drawables.
- * The class name is unchanged from the Glance version so a placed widget keeps working.
- *
- * Also the app's single broadcast entry point: widget button taps (step 5), the redraw and
- * finish alarms, and boot / app update / clock change, which all end in [WidgetUpdater.updateAll].
+ * The home-screen widget (plain RemoteViews). Also the app's single broadcast entry point.
+ * Each placed widget belongs to one account (see [AccountPickerActivity]).
  */
 class ClashWidgetReceiver : AppWidgetProvider() {
 
@@ -36,6 +34,13 @@ class ClashWidgetReceiver : AppWidgetProvider() {
 
     override fun onAppWidgetOptionsChanged(context: Context, manager: AppWidgetManager, id: Int, options: Bundle) =
         refresh(context, "widget")
+
+    override fun onDeleted(context: Context, ids: IntArray) {
+        runAsync {
+            val repo = StateRepository(context.applicationContext)
+            ids.forEach { repo.clearWidget(it) }
+        }
+    }
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
@@ -53,18 +58,19 @@ class ClashWidgetReceiver : AppWidgetProvider() {
 
     private fun refresh(context: Context, source: String) = runAsync { WidgetUpdater.updateAll(context, source) }
 
-    /** A widget button: `clashtimer://tap/<action>/<arg>`. Saved, logged, then redrawn at once. */
+    /** A widget button: `clashtimer://tap/<action>/<arg>/<accountId>`. */
     private fun tap(context: Context, intent: Intent) {
         val segments = intent.data?.pathSegments.orEmpty()
         val action = segments.getOrNull(0) ?: return
         val arg = segments.getOrNull(1) ?: return
+        val accountId = segments.getOrNull(2) ?: StateRepository.DEFAULT_ID
         runAsync {
             val app = context.applicationContext
             val repo = StateRepository(app)
             try {
                 val settings = repo.currentSettings()
                 val now = System.currentTimeMillis() / 1000
-                val line = repo.updateState { before ->
+                val line = repo.updateState(accountId) { before ->
                     val after = WidgetActions.apply(before, action, arg, now, settings.boosts)
                     after to WidgetActions.describe(before, after, action, arg, Names.get(app))
                 }
@@ -91,7 +97,6 @@ class ClashWidgetReceiver : AppWidgetProvider() {
         const val ACTION_TICK = "com.kuswa.clashtimer.WIDGET_TICK"
         const val ACTION_FINISH = "com.kuswa.clashtimer.JOB_FINISH"
         const val ACTION_TAP = "com.kuswa.clashtimer.WIDGET_TAP"
-        /** Some ROMs send this instead of BOOT_COMPLETED after a fast reboot. */
         const val ACTION_QUICKBOOT = "android.intent.action.QUICKBOOT_POWERON"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
@@ -103,9 +108,9 @@ object WidgetUpdater {
         AppWidgetManager.getInstance(context).getAppWidgetIds(ComponentName(context, ClashWidgetReceiver::class.java))
 
     /**
-     * Everything that follows a change or an alarm: posts "… free" notifications for jobs that just
-     * finished, re-renders every placed widget, and schedules the redraw alarm and the finish alarm.
-     * Returns the number of widgets, or -1 on failure (logged to the on-screen sync log; never throws).
+     * Notifies for every account, renders each widget from its own account, and schedules the
+     * redraw alarm and the finish alarm (earliest across all accounts).
+     * Returns the number of widgets, or -1 on failure (logged; never throws).
      */
     suspend fun updateAll(context: Context, source: String): Int {
         val app = context.applicationContext
@@ -115,32 +120,37 @@ object WidgetUpdater {
             val names = Names.get(app)
             val nowMs = System.currentTimeMillis()
             val now = nowMs / 1000
+            val accounts = repo.accounts()
+            val multi = accounts.size > 1
 
-            // Notifications first, marked as sent in the same atomic update so two alarms can't double-post.
-            // Own try: a notification failure must never skip the redraw below, which turns the
-            // finished rows into "Completed ✓" in the same pass that announced them.
-            try {
-                val notices = repo.updateState { state ->
-                    val r = FinishNotices.check(state, settings, names, now)
-                    val fresh = r.notices.filter { it.jobKey !in state.notified }
-                    state.copy(notified = r.notified) to fresh
-                }
-                if (notices.isNotEmpty()) {
-                    if (settings.notificationsEnabled) {
-                        val posted = Notifier.post(app, notices)
-                        repo.log(source, null, if (posted) "Notified: " + notices.joinToString("; ") { it.title }
-                            else "Not notified (notifications are blocked for the app): " + notices.joinToString("; ") { it.title })
-                    } else {
-                        repo.log(source, null, "Finished (notifications off): " + notices.joinToString("; ") { it.title })
+            val states = HashMap<String, AppState>()
+            val finishTimes = mutableListOf<Long>()
+            for (acc in accounts) {
+                val prefix = if (multi) acc.name else null
+                val tag = if (multi) "[${acc.name}] " else ""
+                try {
+                    val notices = repo.updateState(acc.id) { state ->
+                        val r = FinishNotices.check(state, settings, names, now)
+                        val fresh = r.notices.filter { it.jobKey !in state.notified }
+                        state.copy(notified = r.notified) to fresh
                     }
+                    if (notices.isNotEmpty()) {
+                        if (settings.notificationsEnabled) {
+                            val posted = Notifier.post(app, notices, acc.id, prefix)
+                            repo.log(source, null, tag + (if (posted) "Notified: " + notices.joinToString("; ") { it.title }
+                                else "Not notified (notifications are blocked for the app): " + notices.joinToString("; ") { it.title }))
+                        } else {
+                            repo.log(source, null, tag + "Finished (notifications off): " + notices.joinToString("; ") { it.title })
+                        }
+                    }
+                } catch (t: Throwable) {
+                    repo.log(source, false, tag + "Notification failed: ${t.javaClass.simpleName}: ${t.message}")
                 }
-            } catch (t: Throwable) {
-                repo.log(source, false, "Notification failed: ${t.javaClass.simpleName}: ${t.message}")
+                val state = repo.currentState(acc.id)
+                states[acc.id] = state
+                FinishNotices.alarmAt(state, settings, now)?.let { finishTimes += it }
             }
-
-            val state = repo.currentState()
-            // Finish + GRACE_SEC, so the redraw it triggers sees the job as done.
-            WidgetAlarm.scheduleFinish(app, FinishNotices.alarmAt(state, settings, now)?.times(1000))
+            WidgetAlarm.scheduleFinish(app, finishTimes.minOrNull()?.times(1000))
 
             val manager = AppWidgetManager.getInstance(app)
             val ids = widgetIds(app)
@@ -148,12 +158,21 @@ object WidgetUpdater {
                 WidgetAlarm.cancelRedraw(app)
                 return 0
             }
-            val model = WidgetModelBuilder.build(state, settings, names, Times.get(app), now)
+            val widgetAccounts = repo.widgetAccounts(ids)
+            val models = HashMap<String, WidgetModel>()
             val renderer = WidgetRenderer(app)
             for (id in ids) {
-                manager.updateAppWidget(id, renderer.render(model, settings.liveCountdown, manager.getAppWidgetOptions(id)))
+                val acc = accounts.firstOrNull { it.id == widgetAccounts[id] } ?: accounts.first()
+                val model = models.getOrPut(acc.id) {
+                    WidgetModelBuilder.build(states.getValue(acc.id), settings.copy(playerName = acc.name), names, Times.get(app), now)
+                }
+                manager.updateAppWidget(
+                    id,
+                    renderer.render(model, settings.liveCountdown, manager.getAppWidgetOptions(id), acc.id),
+                )
             }
-            WidgetAlarm.scheduleRedraw(app, WidgetSchedule.nextUpdateMs(model, nowMs, settings.liveCountdown))
+            val next = models.values.mapNotNull { WidgetSchedule.nextUpdateMs(it, nowMs, settings.liveCountdown) }.minOrNull()
+            WidgetAlarm.scheduleRedraw(app, next)
             ids.size
         } catch (t: Throwable) {
             repo.log(source, false, "Widget refresh failed: ${t.javaClass.simpleName}: ${t.message}")
@@ -162,15 +181,7 @@ object WidgetUpdater {
     }
 }
 
-/**
- * Two pending alarms:
- * - **redraw** (non-wakeup `RTC`): countdown edges, boost edges, footer text. If the phone is asleep
- *   it is delivered when the screen comes back on, which is when the widget is visible anyway.
- * - **finish** (wakeup, allowed while idle): the next time any job finishes, so the notification
- *   arrives on time even with the screen off.
- */
 object WidgetAlarm {
-    /** Fire slightly after an edge so the re-render lands in the next countdown segment. */
     private const val SLACK_MS = 250L
     private const val MIN_DELAY_MS = 1_000L
 
